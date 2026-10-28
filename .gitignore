@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+output/
+*.pdf
+__pycache__/
+*.pyc
+.bridge.pid
+.tg_bot.pid

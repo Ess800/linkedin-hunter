@@ -1,0 +1,468 @@
+{
+  "id": "NPSY8fSEy8pznADS",
+  "name": "LinkedIn Hunter — Job Discovery Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cron",
+              "expression": "0 8,18 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Twice Daily (08:00, 18:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two automated runs per day. Each run uses one SerpAPI (Google) query\n// and one LinkedIn guest keyword search, rotating focus areas per slot so\n// consecutive runs cover different ground without burning SerpAPI quota.\nconst googleQueries = [\n  'site:linkedin.com/jobs \"Customer Operations\" OR \"Customer Service Lead\" (\"UAE\" OR \"Abu Dhabi\" OR \"Dubai\")',\n  'site:linkedin.com/jobs (\"Systems Architect\" OR \"Solutions Architect\") (\"UAE\" OR \"Remote\")',\n  'site:linkedin.com/jobs (\"Support Automation\" OR \"Process Optimization\") (\"Abu Dhabi\" OR \"Dubai\")',\n  'site:linkedin.com/jobs (\"AI Automation\" OR \"Workflow Automation\") (\"UAE\" OR \"GCC\" OR \"Remote\")',\n  'site:linkedin.com/jobs \"Operations Manager\" (\"Health Insurance\" OR \"Medical\") \"UAE\"',\n  'site:linkedin.com/jobs (\"Customer Experience\" OR \"CX Lead\") (\"Abu Dhabi\" OR \"Dubai\")'\n];\n\nconst linkedinKeywords = [\n  'Customer Operations',\n  'Customer Service Lead',\n  'Systems Automation',\n  'Process Optimization',\n  'Customer Experience',\n  'Operations Manager'\n];\n\nconst now = new Date();\nconst slot = Math.floor(now.getTime() / (12 * 3600 * 1000)) % googleQueries.length;\n\nreturn [{\n  json: {\n    google_query: googleQueries[slot],\n    linkedin_keyword: linkedinKeywords[slot % linkedinKeywords.length],\n    run_slot: slot,\n    timestamp: now.toISOString()\n  }\n}];"
+      },
+      "id": "build-queries",
+      "name": "Build Search Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://serpapi.com/search.json",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "serpApi",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "engine",
+              "value": "google"
+            },
+            {
+              "name": "q",
+              "value": "={{ $json.google_query }}"
+            },
+            {
+              "name": "num",
+              "value": "20"
+            },
+            {
+              "name": "hl",
+              "value": "en"
+            },
+            {
+              "name": "gl",
+              "value": "ae"
+            },
+            {
+              "name": "location",
+              "value": "United Arab Emirates"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "id": "serpapi-search",
+      "name": "Google Search (SerpAPI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 180],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "serpApi": {
+          "id": "6NyIdoHQVg5gXVt7",
+          "name": "SerpAPI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// SerpAPI returns structured results — no HTML scraping, no CAPTCHA.\nconst payload = $input.first().json || {};\nconst results = Array.isArray(payload.organic_results) ? payload.organic_results : [];\nconst jobs = [];\nconst seen = new Set();\n\nfor (const r of results) {\n  const link = (r && r.link) || '';\n  const m = link.match(/linkedin\\.com\\/jobs\\/view\\/([^\"&?\\/\\s]+)/);\n  if (!m) continue;\n  const numeric = (String(m[1]).match(/\\d{5,}/g) || []).pop() || '';\n  if (!numeric || seen.has(numeric)) continue;\n  seen.add(numeric);\n  jobs.push({\n    external_id: `li-${numeric}`,\n    job_id: numeric,\n    url: `https://www.linkedin.com/jobs/view/${numeric}`,\n    source: 'google_serpapi'\n  });\n}\n\nreturn [{ json: { source: 'google_serpapi', jobs } }];"
+      },
+      "id": "parse-google",
+      "name": "Parse Google Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "keywords",
+              "value": "={{ $json.linkedin_keyword }}"
+            },
+            {
+              "name": "location",
+              "value": "United Arab Emirates"
+            },
+            {
+              "name": "start",
+              "value": "0"
+            },
+            {
+              "name": "sortBy",
+              "value": "DD"
+            },
+            {
+              "name": "f_TPR",
+              "value": "r604800"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "linkedin-search",
+      "name": "LinkedIn Guest Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 420],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Public LinkedIn listing page — newest first, last 7 days.\nconst item = $input.first().json || {};\nconst html = item.data || '';\nconst jobs = [];\nconst seen = new Set();\n\nfor (const re of [/\\/jobs\\/view\\/(\\d+)/g, /jobPosting:(\\d+)/g]) {\n  let m;\n  while ((m = re.exec(html)) !== null) {\n    if (seen.has(m[1])) continue;\n    seen.add(m[1]);\n    jobs.push({\n      external_id: `li-${m[1]}`,\n      job_id: m[1],\n      url: `https://www.linkedin.com/jobs/view/${m[1]}`,\n      source: 'linkedin_public'\n    });\n  }\n}\n\nreturn [{ json: { source: 'linkedin_public', jobs } }];"
+      },
+      "id": "parse-linkedin",
+      "name": "Parse LinkedIn Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 420]
+    },
+    {
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 2,
+        "options": {}
+      },
+      "id": "merge-sources",
+      "name": "Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Union both sources, dedupe by LinkedIn job id, cap the batch so a\n// single run stays polite to the guest API and cheap to review.\nconst MAX_JOBS_PER_RUN = 15;\nconst all = $input.all().flatMap(i => (i.json && i.json.jobs) || []);\nconst seen = new Set();\nconst jobs = [];\n\nfor (const job of all) {\n  if (!job || !job.job_id || seen.has(job.job_id)) continue;\n  seen.add(job.job_id);\n  jobs.push(job);\n  if (jobs.length >= MAX_JOBS_PER_RUN) break;\n}\n\nreturn jobs.map(j => ({ json: j }));"
+      },
+      "id": "dedupe-cap",
+      "name": "Dedupe & Cap",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "amount": 2,
+        "unit": "seconds"
+      },
+      "id": "rate-limiter",
+      "name": "Rate Limit (2s)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1540, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ 'https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/' + $json.job_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+            },
+            {
+              "name": "Accept-Language",
+              "value": "en-US,en;q=0.9"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "fetch-job-page",
+      "name": "Fetch Job Page (Public)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract details for EVERY fetched posting (not just the first).\nconst urls = $('Dedupe & Cap').all();\nconst items = $input.all();\nconst out = [];\n\nfunction stripTags(s) {\n  return s.replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n}\n\nfunction decodeEntities(s) {\n  return s\n    .replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&nbsp;/g, ' ')\n    .replace(/&#39;/g, \"'\")\n    .replace(/&quot;/g, '\"');\n}\n\nfor (let i = 0; i < items.length; i++) {\n  const item = items[i].json || {};\n  const prev = (urls[i] && urls[i].json) || {};\n  const html = item.data || '';\n  if (!html || item.error) continue;\n\n  let title = '';\n  const titleMatch = html.match(/<h2[^>]*class=\"[^\"]*top-card-layout__title[^\"]*\"[^>]*>([\\s\\S]*?)<\\/h2>/)\n    || html.match(/<h1[^>]*class=\"[^\"]*top-card-layout__title[^\"]*\"[^>]*>([\\s\\S]*?)<\\/h1>/)\n    || html.match(/<title>([^|<]+)/);\n  if (titleMatch) title = decodeEntities(stripTags(titleMatch[1]));\n\n  let company = '';\n  const companyMatch = html.match(/<a[^>]*class=\"[^\"]*topcard__org-name-link[^\"]*\"[^>]*>([\\s\\S]*?)<\\/a>/)\n    || html.match(/\"companyName\"\\s*:\\s*\"([^\"]+)\"/);\n  if (companyMatch) company = decodeEntities(stripTags(companyMatch[1]));\n\n  let location = '';\n  const locMatch = html.match(/<span[^>]*class=\"[^\"]*topcard__flavor--bullet[^\"]*\"[^>]*>([\\s\\S]*?)<\\/span>/)\n    || html.match(/<span[^>]*class=\"[^\"]*topcard__flavor[^\"]*\"[^>]*>\\s*([^<]+)/);\n  if (locMatch) location = decodeEntities(stripTags(locMatch[1]));\n\n  let description = '';\n  const descMatch = html.match(/<div[^>]*class=\"[^\"]*show-more-less-html__markup[^\"]*\"[^>]*>([\\s\\S]*?)<\\/div>/)\n    || html.match(/<div[^>]*class=\"[^\"]*description__text[^\"]*\"[^>]*>([\\s\\S]*?)<\\/section/);\n  if (descMatch) {\n    description = decodeEntities(descMatch[1]).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\n  }\n\n  let workplace = '';\n  const wpMatch = html.match(/\"workplaceType\"\\s*:\\s*\"([^\"]+)\"/)\n    || html.match(/<span[^>]*class=\"[^\"]*workplace-type[^\"]*\"[^>]*>([^<]+)/);\n  if (wpMatch) workplace = wpMatch[1].trim();\n\n  if (!title && !description) continue;\n\n  out.push({\n    json: {\n      external_id: prev.external_id || '',\n      url: prev.url || '',\n      source: prev.source || 'linkedin_public',\n      job_title: title || 'Unknown Role',\n      company: company || 'Unknown Company',\n      location: location,\n      workplace_type: workplace,\n      description: description.substring(0, 8000),\n      raw_description: description.substring(0, 8000)\n    }\n  });\n}\n\nreturn out;"
+      },
+      "id": "extract-details",
+      "name": "Extract Job Details",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1960, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One request to the bridge carries the whole batch; the bridge dedupes\n// against PostgreSQL and sends one Approve/Ignore card per new job.\nconst jobs = $input.all().map(i => i.json).filter(j => j && j.external_id);\nreturn [{ json: { jobs } }];"
+      },
+      "id": "bundle-jobs",
+      "name": "Bundle Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2180, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://172.17.0.1:8766/ingest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer __BRIDGE_AUTH_TOKEN__"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "ingest-bridge",
+      "name": "Ingest to Bridge",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2400, 300],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 10000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json || {};\nconst summary = {\n  status: res.status || 'UNKNOWN',\n  inserted: res.inserted || 0,\n  duplicates: res.duplicates || 0,\n  failed: res.failed || 0,\n  timestamp: new Date().toISOString()\n};\nconsole.log('Discovery run complete:', JSON.stringify(summary));\nreturn [{ json: summary }];"
+      },
+      "id": "run-summary",
+      "name": "Run Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2620, 300]
+    }
+  ],
+  "connections": {
+    "Twice Daily (08:00, 18:00)": {
+      "main": [
+        [
+          {
+            "node": "Build Search Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Search Query": {
+      "main": [
+        [
+          {
+            "node": "Google Search (SerpAPI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "LinkedIn Guest Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Search (SerpAPI)": {
+      "main": [
+        [
+          {
+            "node": "Parse Google Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Google Results": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn Guest Search": {
+      "main": [
+        [
+          {
+            "node": "Parse LinkedIn Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse LinkedIn Results": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Sources": {
+      "main": [
+        [
+          {
+            "node": "Dedupe & Cap",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedupe & Cap": {
+      "main": [
+        [
+          {
+            "node": "Rate Limit (2s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limit (2s)": {
+      "main": [
+        [
+          {
+            "node": "Fetch Job Page (Public)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Job Page (Public)": {
+      "main": [
+        [
+          {
+            "node": "Extract Job Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Job Details": {
+      "main": [
+        [
+          {
+            "node": "Bundle Jobs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bundle Jobs": {
+      "main": [
+        [
+          {
+            "node": "Ingest to Bridge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest to Bridge": {
+      "main": [
+        [
+          {
+            "node": "Run Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "timezone": "Asia/Dubai"
+  },
+  "tags": [
+    {
+      "name": "career-ops"
+    },
+    {
+      "name": "linkedin-hunter"
+    }
+  ]
+}

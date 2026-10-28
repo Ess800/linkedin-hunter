@@ -1,0 +1,23 @@
+[Unit]
+Description=LinkedIn Hunter Job Worker Bridge (Port 8766)
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=ess
+Group=ess
+WorkingDirectory=/home/user/projects/linkedin-hunter
+ExecStart=/usr/bin/python3 /home/user/projects/linkedin-hunter/bridge/job_worker.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=linkedin-hunter
+
+Environment=BRIDGE_HOST=0.0.0.0
+Environment=BRIDGE_PORT=8766
+EnvironmentFile=-/home/user/projects/linkedin-hunter/.env
+
+[Install]
+WantedBy=multi-user.target
